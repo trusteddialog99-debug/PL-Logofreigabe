@@ -50,14 +50,34 @@ SLOTS = {
 }
 
 # ----------------------------------------------------------------------------
-# Textfelder in template.png (Betreff / Preview-Text / Absender) – hier die vermessenen Felder eintragen.
-# Jeder Eintrag: {'slot': 'links'|'mitte'|'rechts', 'field': 'sender'|'subject'|'preheader',
-#                 'bbox': (x0, y0, x1, y1), 'size': Schrifthöhe in px, 'color': '#RRGGBB', 'bold': True/False}
-# Das Feld wird mit der Hintergrundfarbe der Umgebung überdeckt und der Text mit „…“ gekürzt, wenn er nicht passt.
-# Beispiel:
-#   {'slot': 'links', 'field': 'subject', 'bbox': (150, 318, 640, 338), 'size': 15, 'color': '#1C1C1C', 'bold': False},
+# Textfelder in template.png (exakt vermessen)
+#   slot     : Mockup 'links' (GMX/WEB.DE/1&1), 'mitte' (Telekom/Freenet Mail), 'rechts' (Darkmode/GMX Android)
+#   field    : 'sender' | 'subject' | 'preheader'
+#   x        : linke Textkante, baseline: Grundlinie, max_x: rechte Grenze (danach wird mit „…“ gekürzt)
+#   clear    : Bereich mit dem Platzhaltertext, wird mit `bg` überdeckt
+#   badge    : (optional) Verifiziert-Haken aus dem Template; wandert hinter den Absendernamen
 # ----------------------------------------------------------------------------
-TEXT_SLOTS = []
+TEXT_SLOTS = [
+    # Mockup 1 – Avatar-Darstellung (GMX, WEB.DE, 1&1)
+    {'slot': 'links', 'field': 'sender', 'x': 141, 'baseline': 327, 'max_x': 396, 'clear': (139, 310, 300, 331),
+     'bg': '#FFFFFF', 'size': 17, 'bold': True, 'color': '#000000', 'badge': (249, 312, 267, 330), 'badge_gap': 5},
+    {'slot': 'links', 'field': 'subject', 'x': 142, 'baseline': 354, 'max_x': 442, 'clear': (139, 337, 447, 357),
+     'bg': '#FFFFFF', 'size': 18, 'bold': False, 'color': '#000000'},
+    {'slot': 'links', 'field': 'preheader', 'x': 142, 'baseline': 382, 'max_x': 440, 'clear': (139, 365, 447, 386),
+     'bg': '#FFFFFF', 'size': 17, 'bold': False, 'color': '#A6A6A6'},
+    # Mockup 2 – Logo-Darstellung (Telekom Mail, Freenet Mail); der Absender ist hier das Logo
+    {'slot': 'mitte', 'field': 'subject', 'x': 643, 'baseline': 335, 'max_x': 975, 'clear': (640, 318, 985, 339),
+     'bg': '#FFFFFF', 'size': 15, 'bold': True, 'color': '#000000'},
+    {'slot': 'mitte', 'field': 'preheader', 'x': 643, 'baseline': 361, 'max_x': 1024, 'clear': (640, 344, 1028, 366),
+     'bg': '#FFFFFF', 'size': 16, 'bold': False, 'color': '#222222'},
+    # Mockup 3 – Darkmode-Darstellung (GMX Android)
+    {'slot': 'rechts', 'field': 'sender', 'x': 1281, 'baseline': 347, 'max_x': 1550, 'clear': (1278, 329, 1420, 350),
+     'bg': '#121212', 'size': 19, 'bold': False, 'color': '#E8E8E8', 'badge': (1394, 330, 1413, 349), 'badge_gap': 5},
+    {'slot': 'rechts', 'field': 'subject', 'x': 1281, 'baseline': 374, 'max_x': 1585, 'clear': (1278, 356, 1590, 377),
+     'bg': '#121212', 'size': 16, 'bold': True, 'color': '#83B2FF'},
+    {'slot': 'rechts', 'field': 'preheader', 'x': 1281, 'baseline': 400, 'max_x': 1558, 'clear': (1278, 384, 1562, 405),
+     'bg': '#121212', 'size': 16, 'bold': False, 'color': '#959595'},
+]
 
 
 # ---------------------------------------------------------------------------
@@ -794,11 +814,10 @@ def cand_image(cand, key='png'):
 # ----------------------------------------------------------------------------
 # Schriften (für Initialen und Textfelder)
 # ----------------------------------------------------------------------------
-FONT_REGULAR = ['sourcesanspro-regular.ttf', 'sourcesans3-regular.ttf', 'roboto-regular.ttf', 'inter-regular.ttf',
-                'opensans-regular.ttf', 'notosans-regular.ttf', 'liberationsans-regular.ttf', 'arial.ttf',
-                'helveticaneue.ttf', 'dejavusans.ttf']
-FONT_BOLD = ['sourcesanspro-bold.ttf', 'sourcesans3-bold.ttf', 'roboto-bold.ttf', 'inter-bold.ttf', 'opensans-bold.ttf',
-             'notosans-bold.ttf', 'liberationsans-bold.ttf', 'arialbd.ttf', 'helveticaneue-bold.ttf', 'dejavusans-bold.ttf']
+FONT_REGULAR = ['liberationsans-regular.ttf', 'arimo-regular.ttf', 'arial.ttf', 'roboto-regular.ttf', 'inter-regular.ttf',
+                'opensans-regular.ttf', 'notosans-regular.ttf', 'dejavusans.ttf']
+FONT_BOLD = ['liberationsans-bold.ttf', 'arimo-bold.ttf', 'arialbd.ttf', 'roboto-bold.ttf', 'inter-bold.ttf', 'opensans-bold.ttf',
+             'notosans-bold.ttf', 'dejavusans-bold.ttf']
 
 
 @lru_cache(maxsize=1)
@@ -876,14 +895,15 @@ def slot_pink(template, bbox):
     return max(colors)[1] if colors else (255, 0, 255)
 
 
-def clear_slot(image, bbox, pink, fill, tolerance=130, margin=2):
+def clear_slot(image, bbox, pink, fill, tolerance=130, margin=3):
     """Pinke Platzhalter-Pixel (auch Kantenpixel) durch die Umgebungsfarbe ersetzen."""
     px = image.load()
     width, height = image.size
     for y in range(max(0, bbox[1] - margin), min(height, bbox[3] + margin + 1)):
         for x in range(max(0, bbox[0] - margin), min(width, bbox[2] + margin + 1)):
             p = px[x, y]
-            if sum(abs(p[i] - pink[i]) for i in range(3)) <= tolerance:
+            fringe = min(p[0], p[2]) - p[1] > 10 and abs(p[0] - p[2]) < 60        # Misch-Pixel pink/Hintergrund an der Kante
+            if fringe or sum(abs(p[i] - pink[i]) for i in range(3)) <= tolerance:
                 px[x, y] = fill + (255,)
 
 
@@ -944,14 +964,19 @@ def build_result(template, avatars, logo, opts, texts):
     clear_slot(result, bbox, slot_pink(template, bbox), ring_color(template, bbox))
     if logo is not None:
         result.alpha_composite(render_logo(logo, bbox_size(bbox), opts['logo_pad'], opts['logo_bg']), (bbox[0], bbox[1]))
+    badges = {id(slot): template.crop(slot['badge']) for slot in TEXT_SLOTS if slot.get('badge')}   # vor dem Überdecken sichern
     draw = ImageDraw.Draw(result)
-    for slot in TEXT_SLOTS:                                    # Textfelder (sobald vermessen)
-        value = (texts.get(slot['field']) or '').strip()
-        x0, y0, x1, y1 = slot['bbox']
-        draw.rectangle((x0, y0, x1, y1), fill=ring_color(template, slot['bbox']) + (255,))
-        font = get_font(slot.get('size', 14), slot.get('bold', False))
-        draw.text((x0, (y0 + y1) / 2), fit_text(draw, value, font, x1 - x0 + 1), font=font,
-                  fill=slot.get('color', '#000000'), anchor='lm')
+    for slot in TEXT_SLOTS:                                    # Texte: Platzhaltertext überdecken, neuen Text setzen
+        draw.rectangle(slot['clear'], fill=ImageColor.getrgb(slot['bg']) + (255,))
+        value = re.sub(r'\s+', ' ', texts.get(slot['field']) or '').strip()
+        font = get_font(slot['size'], slot['bold'])
+        badge = badges.get(id(slot))
+        reserve = (badge.width + slot.get('badge_gap', 5)) if badge else 0
+        shown = fit_text(draw, value, font, slot['max_x'] - slot['x'] - reserve)
+        draw.text((slot['x'], slot['baseline']), shown, font=font, fill=slot['color'], anchor='ls')
+        if badge is not None and shown:
+            end_x = slot['x'] + draw.textlength(shown, font=font)
+            result.paste(badge, (round(end_x + slot.get('badge_gap', 5)) - 1, slot['badge'][1]))
     return result
 
 
@@ -962,7 +987,7 @@ def debug_overlay(template):
         shape = draw.ellipse if slot['kind'] == 'circle' else draw.rectangle
         shape(slot['bbox'], outline=(0, 200, 255, 255) if slot['kind'] == 'circle' else (255, 200, 0, 255), width=2)
     for slot in TEXT_SLOTS:
-        draw.rectangle(slot['bbox'], outline=(0, 255, 0, 255), width=1)
+        draw.rectangle(slot['clear'], outline=(0, 255, 0, 255), width=1)
     return preview
 
 
