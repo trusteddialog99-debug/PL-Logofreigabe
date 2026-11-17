@@ -1,12 +1,14 @@
-"""Prelive-Vorschau – Builder
+"""Prelive-Vorschau – Builder (v3)
 Domain eingeben -> Absender, Betreff und Preview-Text werden domain-spezifisch vorbefüllt, Avatare und das
-Logo (5,5:1) werden auf der Website gesucht und in template.png eingesetzt. Manueller Upload (PNG, JPG, WEBP, SVG)
+Logo (5,5:1) werden auf der Website gesucht und in die drei Mockups eingesetzt. Die Mockups sind komplett im Code
+gebaut (kein template.png nötig); die Uhrzeiten entsprechen der aktuellen Uhrzeit. Manueller Upload (PNG, JPG, WEBP, SVG)
 ist jederzeit möglich. Export: alle drei Mockups in EINEM PNG.
 
 Benötigt: streamlit, pillow, requests, beautifulsoup4, cairosvg (SVG-Upload) – siehe requirements.txt / packages.txt.
-template.png muss im selben Ordner wie diese Datei liegen.
+Der Ordner fonts/ (Inter, Carlito, Liberation Sans – alle OFL-lizenziert) muss neben app.py liegen.
 """
 import base64, colorsys, html, io, ipaddress, json, math, os, re, socket, time
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
@@ -41,7 +43,7 @@ RENDER_SIDE = 1024             # SVGs/Bilder werden auf max. diese Kantenlänge 
 SUPERSAMPLE = 8                # Einsetzen der Grafiken in 8-facher Auflösung, dann herunterskalieren (glatte Kanten)
 
 # ----------------------------------------------------------------------------
-# Platzhalter in template.png (exakt vermessen; bbox = x0, y0, x1, y1 inklusive)
+# Platzhalter in den Mockups für Avatare/Logo (exakt vermessen; bbox = x0, y0, x1, y1 inklusive)
 # ----------------------------------------------------------------------------
 SLOTS = {
     'avatar_links': {'kind': 'circle', 'bbox': (83, 301, 127, 346), 'label': 'Mockup 1 – Avatar (GMX / WEB.DE / 1&1)'},
@@ -49,35 +51,6 @@ SLOTS = {
     'avatar_rechts': {'kind': 'circle', 'bbox': (1219, 333, 1264, 377), 'label': 'Mockup 3 – Avatar (Darkmode / GMX Android)'},
 }
 
-# ----------------------------------------------------------------------------
-# Textfelder in template.png (exakt vermessen)
-#   slot     : Mockup 'links' (GMX/WEB.DE/1&1), 'mitte' (Telekom/Freenet Mail), 'rechts' (Darkmode/GMX Android)
-#   field    : 'sender' | 'subject' | 'preheader'
-#   x        : linke Textkante, baseline: Grundlinie, max_x: rechte Grenze (danach wird mit „…“ gekürzt)
-#   clear    : Bereich mit dem Platzhaltertext, wird mit `bg` überdeckt
-#   badge    : (optional) Verifiziert-Haken aus dem Template; wandert hinter den Absendernamen
-# ----------------------------------------------------------------------------
-TEXT_SLOTS = [
-    # Mockup 1 – Avatar-Darstellung (GMX, WEB.DE, 1&1)
-    {'slot': 'links', 'field': 'sender', 'x': 141, 'baseline': 327, 'max_x': 396, 'clear': (139, 310, 300, 331),
-     'bg': '#FFFFFF', 'size': 17, 'bold': True, 'color': '#000000', 'badge': (249, 312, 267, 330), 'badge_gap': 5},
-    {'slot': 'links', 'field': 'subject', 'x': 142, 'baseline': 354, 'max_x': 442, 'clear': (139, 337, 447, 357),
-     'bg': '#FFFFFF', 'size': 18, 'bold': False, 'color': '#000000'},
-    {'slot': 'links', 'field': 'preheader', 'x': 142, 'baseline': 382, 'max_x': 440, 'clear': (139, 365, 447, 386),
-     'bg': '#FFFFFF', 'size': 17, 'bold': False, 'color': '#A6A6A6'},
-    # Mockup 2 – Logo-Darstellung (Telekom Mail, Freenet Mail); der Absender ist hier das Logo
-    {'slot': 'mitte', 'field': 'subject', 'x': 643, 'baseline': 335, 'max_x': 975, 'clear': (640, 318, 985, 339),
-     'bg': '#FFFFFF', 'size': 15, 'bold': True, 'color': '#000000'},
-    {'slot': 'mitte', 'field': 'preheader', 'x': 643, 'baseline': 361, 'max_x': 1024, 'clear': (640, 344, 1028, 366),
-     'bg': '#FFFFFF', 'size': 16, 'bold': False, 'color': '#222222'},
-    # Mockup 3 – Darkmode-Darstellung (GMX Android)
-    {'slot': 'rechts', 'field': 'sender', 'x': 1281, 'baseline': 347, 'max_x': 1550, 'clear': (1278, 329, 1420, 350),
-     'bg': '#121212', 'size': 19, 'bold': False, 'color': '#E8E8E8', 'badge': (1394, 330, 1413, 349), 'badge_gap': 5},
-    {'slot': 'rechts', 'field': 'subject', 'x': 1281, 'baseline': 374, 'max_x': 1585, 'clear': (1278, 356, 1590, 377),
-     'bg': '#121212', 'size': 16, 'bold': True, 'color': '#83B2FF'},
-    {'slot': 'rechts', 'field': 'preheader', 'x': 1281, 'baseline': 400, 'max_x': 1558, 'clear': (1278, 384, 1562, 405),
-     'bg': '#121212', 'size': 16, 'bold': False, 'color': '#959595'},
-]
 
 
 # ---------------------------------------------------------------------------
@@ -851,60 +824,10 @@ def get_font(size, bold=False):
 
 
 # ----------------------------------------------------------------------------
-# template.png: Platzhalter ersetzen
+# Avatare und Logo in die Mockups einsetzen
 # ----------------------------------------------------------------------------
-def script_dir():
-    return Path(__file__).resolve().parent
-
-
-@st.cache_resource(show_spinner=False)
-def load_template():
-    path = script_dir() / 'template.png'
-    if not path.exists():
-        return None
-    return Image.open(path).convert('RGBA')
-
-
 def bbox_size(bbox):
     return (bbox[2] - bbox[0] + 1, bbox[3] - bbox[1] + 1)
-
-
-def ring_color(template, bbox, gap=3):
-    """Hintergrundfarbe rund um den Platzhalter (Median eines schmalen Rahmens)."""
-    x0, y0, x1, y1 = bbox
-    width, height = template.size
-    px = template.load()
-    points = []
-    for x in range(x0, x1 + 1, 2):
-        for y in (y0 - gap, y1 + gap):
-            if 0 <= x < width and 0 <= y < height:
-                points.append(px[x, y][:3])
-    for y in range(y0, y1 + 1, 2):
-        for x in (x0 - gap, x1 + gap):
-            if 0 <= x < width and 0 <= y < height:
-                points.append(px[x, y][:3])
-    if not points:
-        return (255, 255, 255)
-    return tuple(sorted(p[i] for p in points)[len(points) // 2] for i in range(3))
-
-
-def slot_pink(template, bbox):
-    """Farbe des Platzhalters (häufigste Farbe innerhalb der bbox)."""
-    crop = template.crop((bbox[0], bbox[1], bbox[2] + 1, bbox[3] + 1)).convert('RGB')
-    colors = crop.getcolors(maxcolors=crop.width * crop.height + 1) or []
-    return max(colors)[1] if colors else (255, 0, 255)
-
-
-def clear_slot(image, bbox, pink, fill, tolerance=130, margin=3):
-    """Pinke Platzhalter-Pixel (auch Kantenpixel) durch die Umgebungsfarbe ersetzen."""
-    px = image.load()
-    width, height = image.size
-    for y in range(max(0, bbox[1] - margin), min(height, bbox[3] + margin + 1)):
-        for x in range(max(0, bbox[0] - margin), min(width, bbox[2] + margin + 1)):
-            p = px[x, y]
-            fringe = min(p[0], p[2]) - p[1] > 10 and abs(p[0] - p[2]) < 60        # Misch-Pixel pink/Hintergrund an der Kante
-            if fringe or sum(abs(p[i] - pink[i]) for i in range(3)) <= tolerance:
-                px[x, y] = fill + (255,)
 
 
 def render_avatar(image, size, bg, fit='contain', pad=0.0, initials=''):
@@ -941,53 +864,693 @@ def render_logo(image, size, pad=0, backdrop='Transparent', ss=SUPERSAMPLE):
     return layer.resize(size, Image.Resampling.LANCZOS)
 
 
-def fit_text(draw, text, font, max_width):
-    if draw.textlength(text, font=font) <= max_width:
-        return text
-    while text and draw.textlength(text.rstrip() + '…', font=font) > max_width:
-        text = text[:-1]
-    return text.rstrip() + '…'
+# ----------------------------------------------------------------------------
+# Mockups (komplett im Code gebaut)
+# ----------------------------------------------------------------------------
+TEXT_SPECS = {
+ "t1a": {
+  "font": "intb",
+  "size": 30.39,
+  "x": 109.5,
+  "base": 62.5,
+  "fg": "#000000",
+  "ink": [
+   109,
+   39,
+   391,
+   69
+  ]
+ },
+ "t1b": {
+  "font": "car",
+  "size": 34.49,
+  "x": 140.5,
+  "base": 102.38,
+  "fg": "#000000",
+  "ink": [
+   141,
+   78,
+   370,
+   108
+  ]
+ },
+ "t1c": {
+  "font": "car",
+  "size": 33.97,
+  "x": 124.25,
+  "base": 139.25,
+  "fg": "#000000",
+  "ink": [
+   124,
+   117,
+   381,
+   143
+  ]
+ },
+ "t2a": {
+  "font": "intb",
+  "size": 30.13,
+  "x": 693.0,
+  "base": 62.5,
+  "fg": "#000000",
+  "ink": [
+   693,
+   39,
+   950,
+   69
+  ]
+ },
+ "t2b": {
+  "font": "car",
+  "size": 34.49,
+  "x": 706.5,
+  "base": 102.38,
+  "fg": "#000000",
+  "ink": [
+   707,
+   78,
+   936,
+   108
+  ]
+ },
+ "t2c": {
+  "font": "car",
+  "size": 34.32,
+  "x": 633.5,
+  "base": 139.88,
+  "fg": "#000000",
+  "ink": [
+   634,
+   116,
+   1007,
+   143
+  ]
+ },
+ "t3a": {
+  "font": "intb",
+  "size": 30.35,
+  "x": 1235.5,
+  "base": 66.5,
+  "fg": "#000000",
+  "ink": [
+   1235,
+   43,
+   1574,
+   73
+  ]
+ },
+ "t3b": {
+  "font": "car",
+  "size": 34.49,
+  "x": 1289.5,
+  "base": 106.38,
+  "fg": "#000000",
+  "ink": [
+   1290,
+   82,
+   1519,
+   112
+  ]
+ },
+ "t3c": {
+  "font": "int",
+  "size": 30.03,
+  "x": 1309.5,
+  "base": 143.5,
+  "fg": "#000000",
+  "ink": [
+   1310,
+   120,
+   1497,
+   143
+  ]
+ },
+ "p1_time": {
+  "font": "ints",
+  "size": 16.05,
+  "x": 82.5,
+  "base": 204.38,
+  "fg": "#010101",
+  "ink": [
+   82,
+   192,
+   126,
+   205
+  ]
+ },
+ "p1_title": {
+  "font": "intb",
+  "size": 15.01,
+  "x": 125.75,
+  "base": 242.75,
+  "fg": "#000000",
+  "ink": [
+   126,
+   230,
+   218,
+   246
+  ]
+ },
+ "p1_sub": {
+  "font": "int",
+  "size": 12.55,
+  "x": 125.5,
+  "base": 258.75,
+  "fg": "#919191",
+  "ink": [
+   125,
+   249,
+   276,
+   262
+  ]
+ },
+ "p1_sender": {
+  "font": "libb",
+  "size": 16.97,
+  "x": 140.5,
+  "base": 326.5,
+  "fg": "#000000",
+  "ink": [
+   141,
+   313,
+   245,
+   327
+  ]
+ },
+ "p1_subject": {
+  "font": "int",
+  "size": 16.79,
+  "x": 141.5,
+  "base": 353.62,
+  "fg": "#000000",
+  "ink": [
+   142,
+   340,
+   349,
+   354
+  ]
+ },
+ "p1_pre": {
+  "font": "int",
+  "size": 17.07,
+  "x": 141.5,
+  "base": 381.88,
+  "fg": "#a6a6a6",
+  "ink": [
+   142,
+   368,
+   430,
+   382
+  ]
+ },
+ "p1_mtime": {
+  "font": "int",
+  "size": 12.64,
+  "x": 404.5,
+  "base": 322.75,
+  "fg": "#999a9a",
+  "ink": [
+   405,
+   313,
+   440,
+   324
+  ]
+ },
+ "p2_time": {
+  "font": "intm",
+  "size": 18.19,
+  "x": 669.25,
+  "base": 202.88,
+  "fg": "#ffffff",
+  "ink": [
+   669,
+   189,
+   712,
+   203
+  ]
+ },
+ "p2_title": {
+  "font": "intb",
+  "size": 17.55,
+  "x": 778.5,
+  "base": 250.88,
+  "fg": "#ffffff",
+  "ink": [
+   779,
+   237,
+   885,
+   255
+  ]
+ },
+ "p2_edit": {
+  "font": "car",
+  "size": 15.44,
+  "x": 952.5,
+  "base": 251.12,
+  "fg": "#ffffff",
+  "ink": [
+   953,
+   240,
+   1021,
+   252
+  ]
+ },
+ "p2_subject": {
+  "font": "ints",
+  "size": 15.13,
+  "x": 642.75,
+  "base": 334.88,
+  "fg": "#000000",
+  "ink": [
+   643,
+   322,
+   834,
+   335
+  ]
+ },
+ "p2_pre": {
+  "font": "lib",
+  "size": 15.28,
+  "x": 642.75,
+  "base": 360.62,
+  "fg": "#000000",
+  "ink": [
+   643,
+   348,
+   968,
+   361
+  ]
+ },
+ "p2_mtime": {
+  "font": "carb",
+  "size": 14.56,
+  "x": 991.75,
+  "base": 333.75,
+  "fg": "#000000",
+  "ink": [
+   992,
+   323,
+   1026,
+   335
+  ]
+ },
+ "p3_time": {
+  "font": "lib",
+  "size": 14.8,
+  "x": 1220.25,
+  "base": 202.38,
+  "fg": "#f3f3f3",
+  "ink": [
+   1220,
+   191,
+   1257,
+   203
+  ]
+ },
+ "p3_title": {
+  "font": "intb",
+  "size": 18.62,
+  "x": 1281.0,
+  "base": 236.88,
+  "fg": "#dfdfdf",
+  "ink": [
+   1281,
+   220,
+   1392,
+   239
+  ]
+ },
+ "p3_sub": {
+  "font": "car",
+  "size": 17.29,
+  "x": 1280.25,
+  "base": 262.75,
+  "fg": "#a8a8a8",
+  "ink": [
+   1280,
+   250,
+   1459,
+   263
+  ]
+ },
+ "p3_heute": {
+  "font": "intm",
+  "size": 13.18,
+  "x": 1214.75,
+  "base": 302.25,
+  "fg": "#9b9b9b",
+  "ink": [
+   1215,
+   292,
+   1252,
+   303
+  ]
+ },
+ "p3_sender": {
+  "font": "int",
+  "size": 17.9,
+  "x": 1280.5,
+  "base": 346.62,
+  "fg": "#fbfbfb",
+  "ink": [
+   1281,
+   332,
+   1390,
+   347
+  ]
+ },
+ "p3_subject": {
+  "font": "ints",
+  "size": 15.53,
+  "x": 1280.5,
+  "base": 372.62,
+  "fg": "#8abbff",
+  "ink": [
+   1281,
+   359,
+   1477,
+   374
+  ]
+ },
+ "p3_pre": {
+  "font": "lib",
+  "size": 16.18,
+  "x": 1281.5,
+  "base": 399.75,
+  "fg": "#9b9b9b",
+  "ink": [
+   1281,
+   387,
+   1546,
+   400
+  ]
+ },
+ "p3_mtime": {
+  "font": "libb",
+  "size": 13.88,
+  "x": 1560.75,
+  "base": 343.88,
+  "fg": "#f1f1f1",
+  "ink": [
+   1561,
+   333,
+   1596,
+   344
+  ]
+ }
+}
+
+# ============================================================================
+# Mockups komplett im Code gebaut (kein template.png) – Maße aus der bisherigen Vorlage vermessen.
+# Alle Koordinaten in Pixeln des 1661 x 442 px großen Ausgabebildes; gezeichnet wird 4-fach überabgetastet.
+# ============================================================================
+PARAMS = {'r1': 66.5, 's1': 49.0, 'r2': 66.5, 's2': 48.0, 'r3': 57.5, 's3': 39.0}
+CANVAS = (1661, 442)
+MSS = 4                         # Überabtastung
+PHONE_BOTTOM = 418              # unten werden die Geräte gerade abgeschnitten
+FONT_FILES = {'lib': 'LiberationSans-Regular.ttf', 'libb': 'LiberationSans-Bold.ttf', 'int': 'Inter-Regular.otf',
+              'intm': 'Inter-Medium.otf', 'ints': 'Inter-SemiBold.otf', 'intb': 'Inter-Bold.otf',
+              'car': 'Carlito-Regular.ttf', 'carb': 'Carlito-Bold.ttf'}
 
 
-def build_result(template, avatars, logo, opts, texts):
-    """avatars: {'links': (Bild|None, bg), 'rechts': (Bild|None, bg)}; logo: Bild|None; texts: {'sender','subject','preheader'}"""
-    result = template.copy()
+@lru_cache(maxsize=256)
+def mfont(key, size):
+    here = os.path.dirname(os.path.abspath(__file__)) if '__file__' in globals() else os.getcwd()
+    name = FONT_FILES[key]
+    for root in (os.path.join(here, 'fonts'), '/usr/share/fonts/opentype/inter', '/usr/share/fonts/truetype/crosextra',
+                 '/usr/share/fonts/truetype/liberation', '/usr/share/fonts/truetype/liberation2'):
+        path = os.path.join(root, name)
+        if os.path.exists(path):
+            return ImageFont.truetype(path, size)
+    raise RuntimeError(f'Schriftdatei {name} fehlt (Ordner "fonts" neben app.py).')
+
+
+class Cv:
+    """Zeichenfläche mit Überabtastung; Koordinaten in Zielpixeln (Pixel i deckt den Bereich [i, i+1) ab)."""
+    def __init__(self, w, h, bg=(255, 255, 255)):
+        self.ss = MSS
+        self.img = Image.new('RGB', (w * MSS, h * MSS), bg)
+        self.d = ImageDraw.Draw(self.img)
+
+    def b(self, box):
+        return tuple(v * self.ss for v in box)
+
+    def rect(self, x0, y0, x1, y1, fill):
+        self.d.rectangle((x0 * self.ss, y0 * self.ss, x1 * self.ss - 1, y1 * self.ss - 1), fill=fill)
+
+    def rrect(self, x0, y0, x1, y1, r, fill):
+        self.d.rounded_rectangle((x0 * self.ss, y0 * self.ss, x1 * self.ss - 1, y1 * self.ss - 1), radius=r * self.ss, fill=fill)
+
+    def circle(self, cx, cy, r, fill=None, outline=None, width=1):
+        s = self.ss
+        self.d.ellipse(((cx - r) * s, (cy - r) * s, (cx + r) * s - 1, (cy + r) * s - 1), fill=fill, outline=outline,
+                       width=max(1, round(width * s)) if outline else 0)
+
+    def line(self, pts, w, fill, caps=True):
+        s = self.ss
+        self.d.line([(x * s, y * s) for x, y in pts], fill=fill, width=max(1, round(w * s)), joint='curve')
+        if caps:
+            for x, y in (pts[0], pts[-1]):
+                self.circle(x, y, w / 2, fill=fill)
+
+    def poly(self, pts, fill):
+        self.d.polygon([(x * self.ss, y * self.ss) for x, y in pts], fill=fill)
+
+    def text(self, key, value, x=None, fill=None, right=None, size=None, base=None):
+        """Text mit der kalibrierten Schrift/Größe/Grundlinie von `key`. right=: rechtsbündig an dieser x-Kante."""
+        spec = TEXT_SPECS[key]
+        size = size or spec['size']
+        font = mfont(spec['font'], size * self.ss)
+        px = spec['x'] if x is None else x
+        if right is not None:
+            px = right - font.getbbox(value, anchor='ls')[2] / self.ss
+        self.d.text((px * self.ss, (spec['base'] if base is None else base) * self.ss), value, font=font, fill=fill or spec['fg'], anchor='ls')
+        return px + font.getlength(value) / self.ss
+
+    def width(self, key, value):
+        spec = TEXT_SPECS[key]
+        return mfont(spec['font'], spec['size'] * self.ss).getlength(value) / self.ss
+
+    def finish(self):
+        return self.img.reduce(self.ss).convert('RGBA')
+
+
+def trunc(cv, key, value, max_w):
+    """Text mit „…“ kürzen, wenn er breiter als max_w ist."""
+    value = re.sub(r'\s+', ' ', value or '').strip()
+    if cv.width(key, value) <= max_w:
+        return value
+    while value and cv.width(key, value.rstrip() + '…') > max_w:
+        value = value[:-1]
+    return value.rstrip() + '…'
+
+
+def verified_badge(cv, cx, cy, r, fill='#467DCD'):
+    """Blaues Verifiziert-Siegel (gezackter Kreis mit weißem Haken)."""
+    pts = []
+    for i in range(32):
+        a = math.pi * 2 * i / 32
+        rr = r * (1.0 if i % 4 < 2 else 0.88)
+        pts.append((cx + rr * math.cos(a), cy + rr * math.sin(a)))
+    cv.poly(pts, fill)
+    cv.line([(cx - r * .42, cy + r * .02), (cx - r * .1, cy + r * .34), (cx + r * .46, cy - r * .3)], r * .26, '#FFFFFF')
+
+
+def frame(cv, box, radius, layers, screen_r):
+    """Gerätrahmen aus Schichten (von außen nach innen). box = (x0, y0, x1, y1) Außenkante; layers = [(inset_l, inset_t, inset_r, color)]."""
+    x0, y0, x1, y1 = box
+    for i, (il, it, ir, color) in enumerate(layers):
+        cv.rrect(x0 + il, y0 + it, x1 - ir, 700, max(2, radius - (il + it + ir) / 3), color)
+
+
+# ------------------------------------------------------------------ Titel
+def draw_titles(cv):
+    for key, value in {'t1a': 'Avatar-Darstellung', 't1b': 'exemplarisch für', 't1c': 'GMX, WEB.DE 1&1',
+                       't2a': 'Logo-Darstellung', 't2b': 'exemplarisch für', 't2c': 'Telekom Mail, Freenet Mail',
+                       't3a': 'Darkmode-Darstellung', 't3b': 'exemplarisch für', 't3c': 'GMX Android'}.items():
+        cv.text(key, value)
+
+
+# ------------------------------------------------------------------ Gerät 1: GMX / WEB.DE / 1&1 (iPhone, hell)
+def draw_phone1(cv, t, placeholder):
+    frame(cv, (39.8, 155.75, 478.1, 0), PARAMS['r1'], [(0, 0, 0, '#161513'), (3.2, 2.25, 3.2, '#FDFDFD'), (6.2, 4.25, 6.1, '#464748'),
+                                            (9.2, 6.25, 9.1, '#100F0D')], 0)
+    sx0, sy0, sx1 = 57.6, 171.75, 459.3
+    cv.rrect(sx0, sy0, sx1, 600, PARAMS['s1'], '#FFFFFF')
+    cv.rect(sx0 - 1, 440, sx1 + 1, 600, '#FFFFFF')
+    # Statusleiste
+    cv.text('p1_time', t['status'])
+    cv.rrect(208.5, 186, 310.5, 216, 15, '#100F0D')                       # Dynamic Island
+    cv.circle(295.5, 201.2, 4.6, '#1B2147')
+    for i in range(4):
+        cv.circle(369.3 + i * 5.1, 202.6, 1.35, '#B9B9BA')               # Mobilfunk (schwach)
+    for k, rr in enumerate((11.2, 8.0, 4.8)):                            # WLAN
+        cv.d.arc(((399 - rr) * cv.ss, (207.2 - rr) * cv.ss, (399 + rr) * cv.ss, (207.2 + rr) * cv.ss), 225, 315, fill='#100F0D',
+                 width=round(2.1 * cv.ss))
+    cv.circle(399, 203.4, 1.6, '#100F0D')
+    cv.rrect(413.7, 194.6, 437, 205.6, 3.4, '#B5B5B6'); cv.rrect(414.7, 195.6, 436, 204.6, 2.6, '#FFFFFF')
+    cv.rrect(415.7, 196.6, 430.8, 203.6, 1.6, '#100F0D'); cv.rrect(438.2, 198.7, 439.7, 201.6, 0.7, '#B5B5B6')
+    # Kopfzeile
+    for cx, cy in ((89.6, 245.0), (360.2, 245.0), (419.4, 245.0)):
+        cv.circle(cx, cy, 23.4, '#FBFBFB')
+    cv.line([(94.2, 236.6), (86.2, 245), (94.2, 253.4)], 1.9, '#100F0D')
+    cv.circle(360.2, 245, 9.4, outline='#100F0D', width=1.7)
+    cv.line([(355.6, 245.4), (359, 248.6), (365.2, 241.8)], 1.7, '#100F0D')
+    cv.rrect(411.5, 238.4, 424.4, 251.5, 1.4, '#100F0D'); cv.rrect(413.0, 240.0, 422.8, 250.0, 0.4, '#FBFBFB')
+    cv.line([(417.3, 247.6), (427.6, 237.2)], 3.4, '#100F0D')
+    cv.text('p1_title', 'Posteingang')
+    cv.text('p1_sub', 'trusteddialog01@gmx.net')
+    cv.rect(65.5, 290.3, 443.2, 291.9, '#E9E9E9')
+    # Mail
+    if placeholder:
+        cv.circle(105.2, 323.7, 22.5, '#FF00FF')
+    x_end = cv.text('p1_sender', trunc(cv, 'p1_sender', t['sender'], 396 - 141.5 - 20))
+    verified_badge(cv, x_end + 11.2, 320.0, 7.6)
+    cv.text('p1_subject', trunc(cv, 'p1_subject', t['subject'], 300))
+    cv.text('p1_pre', trunc(cv, 'p1_pre', t['preheader'], 299))
+    cv.text('p1_mtime', t['mail'], right=TEXT_SPECS['p1_mtime']['ink'][2])
+    cv.rect(82, 409.6, 456, 411.0, '#E8E8E8')
+
+
+# ------------------------------------------------------------------ Gerät 2: Telekom Mail / Freenet Mail (iPhone, magenta)
+def draw_phone2(cv, t, placeholder):
+    frame(cv, (610.0, 155.75, 1051.0, 0), PARAMS['r2'], [(0, 0, 0, '#161513'), (3.3, 2.25, 3.1, '#FDFDFD'), (6.0, 4.25, 6.0, '#464748'),
+                                              (9.3, 6.25, 9.3, '#100F0D')], 0)
+    sx0, sy0, sx1 = 627.3, 171.75, 1031.4
+    pink = '#E30074'
+    cv.rrect(sx0, sy0, sx1, 600, PARAMS['s2'], '#FFFFFF')
+    cv.rrect(sx0, sy0, sx1, 267.6, PARAMS['s2'], pink); cv.rect(sx0, 230, sx1, 267.6, pink)
+    for i, c in enumerate(('#CD9BB8', '#D9DDDB', '#DCDDDD', '#E2E2E3', '#E8E8E8', '#EFEFEF', '#F4F4F4', '#F8F8F8', '#FBFBFB', '#FDFDFD')):
+        cv.rect(sx0, 267.6 + i, sx1, 268.6 + i, c)
+    cv.rect(sx0, 270, 633.6, 385.5, pink)
+    cv.rect(633.6, 387.0, sx1, 388.2, '#E8E8E8')
+    # Statusleiste
+    cv.rrect(779.0, 186, 881.5, 216, 15, '#100F0D'); cv.circle(865.5, 201.2, 4.6, '#1B2147')
+    dx = cv.text('p2_time', t['status']) - 712.8
+    cv.poly([(719.5 + dx, 198.6), (721.6 + dx, 198.6), (722.0 + dx, 193.2), (724.8 + dx, 191.4), (727.6 + dx, 193.2), (728.0 + dx, 198.6), (729.9 + dx, 201.0), (717.2 + dx, 201.0)], '#FFFFFF')
+    cv.line([(717.4 + dx, 190.6), (730.4 + dx, 202.4)], 1.3, '#FFFFFF')
+    for i, (x, top, col) in enumerate(((922.2, 197.0, '#FFFFFF'), (927.5, 193.7, '#F2679F'), (933.0, 191.0, '#E94B92'), (939.4, 189.0, '#E94B92'))):
+        cv.rrect(x, top, x + 2.8, 201.8, 1.0, col)
+    for rr in (9.3, 6.2, 3.1):
+        cv.d.arc(((959 - rr) * cv.ss, (201.4 - rr) * cv.ss, (959 + rr) * cv.ss, (201.4 + rr) * cv.ss), 227, 313, fill='#FFFFFF',
+                 width=round(2.0 * cv.ss))
+    cv.circle(959, 199.8, 1.5, '#FFFFFF')
+    cv.rrect(976.0, 188.7, 1001.3, 202.6, 5.0, '#FFD60A')
+    cv.text('p2_mtime', '95', right=998.6, fill='#100F0D', size=15.5, base=200.4)
+    cv.rrect(1003.2, 194.4, 1004.9, 198.0, 0.8, '#E97AAE')
+    # Kopfzeile
+    cv.line([(650.4, 232.6), (640.0, 241.9), (650.4, 251.2)], 1.3, '#FFFFFF')
+    cv.text('p2_title', 'Posteingang')
+    cv.text('p2_edit', 'Bearbeiten')
+    # Logo-Platzhalter / @-Symbol
+    cv.circle(651.0, 300.4, 7.6, outline='#2B6CB5', width=1.7); cv.circle(651.6, 300.6, 3.6, outline='#2B6CB5', width=1.5)
+    cv.poly([(652.0, 301.8), (654.0, 303.6), (660.2, 291.8), (658.4, 291.2)], '#1B3C8C')
+    if placeholder:
+        cv.rect(665, 290, 787, 312, '#FF00FF')
+    cv.text('p2_subject', trunc(cv, 'p2_subject', t['subject'], 975 - 642.75))
+    cv.text('p2_pre', trunc(cv, 'p2_pre', t['preheader'], 1024 - 642.75))
+    cv.text('p2_mtime', t['mail'], right=TEXT_SPECS['p2_mtime']['ink'][2])
+
+
+# ------------------------------------------------------------------ Gerät 3: GMX Android (Darkmode)
+RIM = ['#696969', '#373737', '#424242', '#6D6D6D', '#7A7A7A', '#515151', '#4C4C4C', '#343434', '#202020', '#202020', '#2C2C2C',
+       '#1F1F1F', '#1A1A1A', '#1A1A1A', '#1A1A1A', '#1A1A1A', '#1A1A1A', '#090909']
+
+
+def draw_phone3(cv, t, placeholder):
+    x0, y0, x1 = 1180.0, 161.0, 1627.5
+    for i, c in enumerate(RIM):
+        cv.rrect(x0 + i, y0 + i, x1 - i, 700, max(4, PARAMS['r3'] - i), c)
+    sx0, sx1 = x0 + len(RIM), x1 - len(RIM)
+    cv.rrect(sx0, y0 + len(RIM), sx1, 700, PARAMS['s3'], '#000000')
+    cv.rect(sx0, 208.5, sx1, 272.6, '#373737')
+    cv.rect(sx0, 273.4, sx1, 320.4, '#000000')
+    cv.rect(sx0, 320.4, sx1, 321.8, '#1B1B1B')
+    cv.rect(sx0, 321.8, sx1, 700, '#111111')
+    cv.circle(1403.0, 196.0, 9.0, '#171717'); cv.circle(1403.0, 196.0, 6.6, '#050505'); cv.circle(1403.6, 196.6, 2.4, '#1D2433')
+    # Statusleiste
+    dx = cv.text('p3_time', t['status']) - 1257.6
+    cv.rrect(1263.8 + dx, 191.6, 1275.6 + dx, 203.4, 1.6, '#E8E8E8'); cv.circle(1269.7 + dx, 198.0, 2.2, '#8A8A8A')
+    cv.line([(1282.2 + dx, 202.0), (1282.2 + dx, 192.8), (1288.0 + dx, 199.0), (1293.8 + dx, 192.8), (1293.8 + dx, 202.0)], 1.7, '#E8E8E8', caps=False)
+    cv.line([(1301.6 + dx, 201.4), (1307.0 + dx, 198.4), (1312.0 + dx, 201.4)], 2.0, '#E8E8E8'); cv.line([(1302.8 + dx, 192.8), (1307.0 + dx, 196.4), (1311.2 + dx, 192.8)], 1.6, '#E8E8E8')
+    cv.circle(1326.0 + dx, 197.4, 2.0, '#E8E8E8')
+    cv.line([(1497.5, 192.6), (1506.8, 201.4)], 1.8, '#E8E8E8'); cv.poly([(1497.5, 198.8), (1501.0, 198.8), (1504.6, 195.6), (1504.6, 192.2), (1501.0, 195.6), (1497.5, 195.6)], '#E8E8E8')
+    cv.text('p3_mtime', '62%', right=1578.4, size=13.4, base=203.2)
+    for i in range(4):
+        cv.rect(1531.2 + i * 3.4, 201.6 - 3 - i * 2.6, 1532.9 + i * 3.4, 201.6, '#9A9A9A')
+    cv.rrect(1579.6, 191.4, 1586.8, 203.4, 1.6, '#E8E8E8'); cv.rect(1579.6, 191.4, 1586.8, 196.0, '#5A5A5A')
+    # Kopfzeile
+    for yy in (232.4, 238.6, 244.9):
+        cv.rect(1217.9, yy, 1239.9, yy + 2.8, '#E8E8E8')
+    cv.text('p3_title', '#Newsletter')
+    cv.text('p3_sub', 'Aktualisiert: Gerade eben')
+    cv.circle(1528.3, 238.0, 6.8, outline='#E8E8E8', width=1.9); cv.line([(1533.4, 243.2), (1540.8, 250.2)], 2.2, '#E8E8E8')
+    for yy, kx in ((233.2, 1590.0), (240.4, 1582.0), (247.6, 1588.0)):
+        cv.rect(1577.0, yy - 1.0, 1598.4, yy + 1.0, '#E8E8E8'); cv.rect(kx - 2.0, yy - 3.0, kx + 2.0, yy + 3.0, '#E8E8E8')
+    cv.text('p3_heute', 'Heute')
+    # Mail
+    cv.circle(1241.5, 355.0, 25.7, '#000000')
+    if placeholder:
+        cv.circle(1241.5, 355.0, 22.7, '#FF00FF')
+    x_end = cv.text('p3_sender', trunc(cv, 'p3_sender', t['sender'], 1550 - 1280.5 - 22))
+    verified_badge(cv, x_end + 13.0, 340.0, 7.6, '#4881D4')
+    cv.text('p3_subject', trunc(cv, 'p3_subject', t['subject'], 303))
+    cv.text('p3_pre', trunc(cv, 'p3_pre', t['preheader'], 277))
+    cv.text('p3_mtime', t['mail'], right=TEXT_SPECS['p3_mtime']['ink'][2])
+    cx, cy, R = 1583.4, 394.8, 11.0
+    star = [(cx + (R if k % 2 == 0 else R * .42) * math.sin(math.pi * k / 5), cy - (R if k % 2 == 0 else R * .42) * math.cos(math.pi * k / 5)) for k in range(10)]
+    cv.line(star + [star[0]], 1.7, '#E8E8E8')
+
+
+def render_mockups(texts, now_status, now_mail, placeholder=False):
+    """Alle drei Mockups als ein Bild (1661 x 442 px). texts: sender, subject, preheader."""
+    cv = Cv(*CANVAS)
+    t = {'sender': texts.get('sender') or '', 'subject': texts.get('subject') or '', 'preheader': texts.get('preheader') or '',
+         'status': now_status, 'mail': now_mail}
+    draw_titles(cv)
+    draw_phone1(cv, t, placeholder)
+    draw_phone2(cv, t, placeholder)
+    draw_phone3(cv, t, placeholder)
+    cv.rect(0, PHONE_BOTTOM, CANVAS[0], CANVAS[1], '#FFFFFF')              # Geräte unten gerade abgeschnitten
+    return cv.finish()
+
+
+
+def mockup_times(manual=None):
+    """(Uhrzeit Statusleiste, Uhrzeit der E-Mail). Statusleiste = aktuelle Uhrzeit (Deutschland), E-Mail = 3 Minuten früher."""
+    if manual is None:
+        try:
+            from zoneinfo import ZoneInfo
+            now = datetime.now(ZoneInfo('Europe/Berlin'))
+        except Exception:
+            now = datetime.now()
+    else:
+        now = datetime.combine(datetime.today(), manual)
+    return now.strftime('%H:%M'), (now - timedelta(minutes=3)).strftime('%H:%M')
+
+
+def build_result(avatars, logo, opts, texts, times):
+    """Mockups zeichnen und Avatare/Logo einsetzen. avatars: {'links': (Bild|None, bg), 'rechts': (...)}; logo: Bild|None."""
+    result = render_mockups(texts, times[0], times[1])
     initials = ''.join(x[0] for x in (texts.get('sender') or '').split()[:2]).upper() or 'M'
     for key, slot_key in (('links', 'avatar_links'), ('rechts', 'avatar_rechts')):
         bbox = SLOTS[slot_key]['bbox']
-        clear_slot(result, bbox, slot_pink(template, bbox), ring_color(template, bbox))
         image, bg = avatars[key]
         overlay = render_avatar(image, bbox_size(bbox), bg if image is not None else AVATAR_DEFAULT,
                                 opts['fit'], opts['pad'], initials)
         result.alpha_composite(overlay, (bbox[0], bbox[1]))
     bbox = SLOTS['logo_mitte']['bbox']
-    clear_slot(result, bbox, slot_pink(template, bbox), ring_color(template, bbox))
     if logo is not None:
         result.alpha_composite(render_logo(logo, bbox_size(bbox), opts['logo_pad'], opts['logo_bg']), (bbox[0], bbox[1]))
-    badges = {id(slot): template.crop(slot['badge']) for slot in TEXT_SLOTS if slot.get('badge')}   # vor dem Überdecken sichern
-    draw = ImageDraw.Draw(result)
-    for slot in TEXT_SLOTS:                                    # Texte: Platzhaltertext überdecken, neuen Text setzen
-        draw.rectangle(slot['clear'], fill=ImageColor.getrgb(slot['bg']) + (255,))
-        value = re.sub(r'\s+', ' ', texts.get(slot['field']) or '').strip()
-        font = get_font(slot['size'], slot['bold'])
-        badge = badges.get(id(slot))
-        reserve = (badge.width + slot.get('badge_gap', 5)) if badge else 0
-        shown = fit_text(draw, value, font, slot['max_x'] - slot['x'] - reserve)
-        draw.text((slot['x'], slot['baseline']), shown, font=font, fill=slot['color'], anchor='ls')
-        if badge is not None and shown:
-            end_x = slot['x'] + draw.textlength(shown, font=font)
-            result.paste(badge, (round(end_x + slot.get('badge_gap', 5)) - 1, slot['badge'][1]))
     return result
 
 
-def debug_overlay(template):
-    preview = template.copy()
+def debug_overlay(result):
+    preview = result.copy()
     draw = ImageDraw.Draw(preview)
     for slot in SLOTS.values():
         shape = draw.ellipse if slot['kind'] == 'circle' else draw.rectangle
         shape(slot['bbox'], outline=(0, 200, 255, 255) if slot['kind'] == 'circle' else (255, 200, 0, 255), width=2)
-    for slot in TEXT_SLOTS:
-        draw.rectangle(slot['clear'], outline=(0, 255, 0, 255), width=1)
     return preview
 
 
@@ -1056,16 +1619,12 @@ for key, value in {'domain': '', 'sender': 'Marke', 'subject': 'Betreff', 'prehe
                    'paste_html': ''}.items():
     st.session_state.setdefault(key, value)
 
-template = load_template()
 left, right = st.columns([1, 2], gap='large')          # links bearbeiten, rechts die sticky Vorschau
 
 with left:
     st.title('Prelive-Vorschau')
     st.caption('Domain eingeben, Vorschläge automatisch erstellen lassen, bei Bedarf anpassen – '
                'am Ende alle drei Mockups als ein PNG herunterladen.')
-    if template is None:
-        st.error('template.png wurde nicht gefunden. Bitte im selben Ordner wie app.py ablegen.')
-        st.stop()
 
     # ------------------------------------------------------------------ 1. Domain
     st.subheader('1. Unternehmen analysieren')
@@ -1145,9 +1704,6 @@ with left:
         st.text_input('Absender / Marke', key='sender', max_chars=37)
         st.text_input('Betreff', key='subject', max_chars=37)
         st.text_input('Preview-Text', key='preheader', max_chars=37)
-        if not TEXT_SLOTS:
-            st.caption('Hinweis: Die Textfelder in template.png sind noch nicht eingemessen (TEXT_SLOTS in app.py) – '
-                       'die Texte werden daher noch nicht in die Mockups geschrieben.')
 
     # ------------------------------------------------------------------ 3. Avatar
     st.subheader('3. Avatar (Mockup 1 und 3)')
@@ -1217,6 +1773,9 @@ with left:
 
     with st.expander('Erweitert'):
         show_debug = st.checkbox('Platzhalter-Konturen anzeigen', value=False)
+        manual_time = st.checkbox('Uhrzeit manuell festlegen (statt aktuelle Uhrzeit)', value=False, key='manual_time_on')
+        manual_value = st.time_input('Uhrzeit im Mockup', value=datetime.now().time().replace(second=0, microsecond=0),
+                                     key='manual_time_value', step=60) if manual_time else None
 
 
 # ------------------------------------------------------------------ Grafiken zusammenführen
@@ -1256,7 +1815,8 @@ avatars = {'links': avatar_for(up_left), 'rechts': avatar_for(up_right)}
 opts = {'fit': 'cover' if st.session_state.fit == 'Füllend' else 'contain', 'pad': st.session_state.pad / 100,
         'logo_pad': st.session_state.logo_pad, 'logo_bg': st.session_state.logo_bg}
 texts = {'sender': st.session_state.sender, 'subject': st.session_state.subject, 'preheader': st.session_state.preheader}
-result = build_result(template, avatars, logo_image, opts, texts)
+times = mockup_times(manual_value)
+result = build_result(avatars, logo_image, opts, texts, times)
 
 with left:
     for message in errors:
@@ -1277,4 +1837,5 @@ with right:
                                                st.session_state.logo_bg, ss=2)),
                     file_name=f'logo-5-5-zu-1_{brand_slug}.png', mime='image/png')
     st.caption('Avatare und Logo stammen aus der Website-Analyse – SVG, PNG, JPG und WEBP können jederzeit selbst hochgeladen werden. '
-               f'Export: eine Grafik mit allen 3 Mockups ({template.width} × {template.height} px).')
+               f'Uhrzeit im Mockup {times[0]}, E-Mail {times[1]} (aktuelle Uhrzeit bzw. 3 Minuten früher). '
+               f'Export: eine Grafik mit allen 3 Mockups ({CANVAS[0]} × {CANVAS[1]} px).')

@@ -3,3 +3,4 @@ pillow>=10.1
 requests
 beautifulsoup4
 cairosvg
+tzdata
