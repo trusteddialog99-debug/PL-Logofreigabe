@@ -1,4 +1,0 @@
-Schriften in diesem Ordner (alle unter der SIL Open Font License 1.1 frei nutzbar und weitergebbar):
-- Inter (Rasmus Andersson)
-- Carlito (Lukasz Dziedzic, Google)
-- Liberation Sans (Red Hat)
